@@ -1,0 +1,1 @@
+- Loads second stage bootloader image to RAM (IRAM and DRAM) from flash offset 0x1000
