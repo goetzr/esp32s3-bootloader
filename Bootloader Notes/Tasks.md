@@ -1,0 +1,4 @@
+- [ ] Incorporate standard C library and utility functions found in ROM
+	- ROM linker scripts
+		- components/esp_rom/esp32s3/ld/esp32s3.rom.ld
+		- components/esp_rom/esp32s3/ld/esp32s3.rom.libc.ld

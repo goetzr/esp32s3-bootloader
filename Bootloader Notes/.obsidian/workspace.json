@@ -13,15 +13,58 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Custom Bootloader.md",
+                "file": "AI/ROM Code (AI).md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "Custom Bootloader"
+              "title": "ROM Code (AI)"
+            }
+          },
+          {
+            "id": "ff7e9ddf040747a6",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "AI/Custom Bootloader (AI).md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "Custom Bootloader (AI)"
+            }
+          },
+          {
+            "id": "573d50977fd02603",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "ROM Code.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "ROM Code"
+            }
+          },
+          {
+            "id": "eec1857fa9a1c064",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "libc.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "libc"
             }
           }
-        ]
+        ],
+        "currentTab": 2
       }
     ],
     "direction": "vertical"
@@ -188,10 +231,18 @@
       "bases:Create new base": false
     }
   },
-  "active": "090d64bb226d6942",
+  "active": "573d50977fd02603",
   "lastOpenFiles": [
+    "Tasks.md",
+    "ROM Code.md",
+    "libc.md",
+    "AI/ROM Code (AI).md",
+    "Questions.md",
+    "AI/Custom Bootloader (AI).md",
+    "Definitions.md",
+    "AI",
+    "Scratch.md",
     "Application Startup Flow.md",
-    "Custom Bootloader.md",
     "Welcome.md"
   ]
 }

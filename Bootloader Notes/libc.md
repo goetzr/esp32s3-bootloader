@@ -1,0 +1,2 @@
+- The implementation of some functions exist in ROM. These functions are mapped directly to these implementations instead of occupying space in flash. This maximizes available space for application code in SRAM/flash.
+- A minimal implementation of some functions exist in ROM. A more fully featured version of these functions may be compiled into libc and occupy space in flash. Which version is used depends on a build-time configuration option (i.e. CONFIG_LIBC_NEWLIB_NANO_FORMAT)

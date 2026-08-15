@@ -1,0 +1,6 @@
+- components/esp_rom/README.md
+- components/esp_rom/esp32s3
+	- esp_rom_caps.h
+	- ld/\*.ld
+	- include/esp32s3/rom/\*.h
+		- I don't believe I need most if not all of these functions

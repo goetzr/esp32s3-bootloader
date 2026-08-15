@@ -1,0 +1,4 @@
+- Espressif Tool System (ETS)
+	- Internal low-level ROM function
+	- Prefixed "ets_"
+	- Not intended to be called directly
