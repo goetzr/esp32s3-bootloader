@@ -2,3 +2,7 @@
 	- ROM linker scripts
 		- components/esp_rom/esp32s3/ld/esp32s3.rom.ld
 		- components/esp_rom/esp32s3/ld/esp32s3.rom.libc.ld
+- [ ] Copy and re-use relevant headers/functions for hardware registers in soc component
+- [ ] Incorporate esp-libc component
+	- **What you replace:** You do not need the full `esp_libc` component, but you must provide minimal system call stubs (e.g., implementing `_write()` to output characters to UART FIFO registers and `_sbrk()` for basic `malloc` heap support).
+	- **Reentrancy:** In a single-threaded or custom bare-metal loop, you can link against the toolchain's `libc.a` and `libnosys.a` (or `libgloss.a`) without needing task-level reentrancy locks.
