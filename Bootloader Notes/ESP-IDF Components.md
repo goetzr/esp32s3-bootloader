@@ -160,6 +160,203 @@ soc/
 ```
 
 # xtensa
+
+In ESP-IDF, the `xtensa`**xtensa** component is the **CPU architecture and Instruction Set Architecture (ISA) support layer** for Espressif chips that use Cadence Tensilica Xtensa CPU cores (such as the ESP32, ESP32-S2, and ESP32-S3).
+
+While components like `soc` define peripheral registers and the memory map of the overall chip, the `xtensa` component is concerned purely with the **internal CPU core architecture, execution pipeline, hardware registers, and low-level exception vectors**.
+
+### Core Responsibilities of the `xtensa` Component
+
+#### 1. Hardware Exception and Interrupt Vector Tables
+
+The Xtensa architecture uses dedicated, fixed-offset memory entry points for hardware traps, context switches, and interrupts:
+
+- **Reset Vector:** The raw CPU entry point after a hardware reset.
+    
+- **Window Overflow / Underflow Vectors:** In Xtensa's default _Windowed ABI_, the CPU automatically shifts register frames (`a0`–`a15`) across physical register files. When the internal register file is full or empty during nested function calls, the hardware raises an overflow/underflow exception. The `xtensa` component provides the assembly handlers (`WindowOverflow4`, `WindowUnderflow4`, etc.) that spill and restore registers to/from the stack.
+    
+- **User & Kernel Exception Vectors:** The initial entry points for CPU traps (e.g., misaligned memory access, illegal instruction, division by zero).
+    
+- **Level 1–7 Interrupt Vectors:** Low-level dispatcher stubs that save CPU register state to a stack frame before jumping into C/C++ interrupt handlers.
+    
+
+#### 2. CPU Special Register Access Primitives
+
+The Xtensa LX6 / LX7 cores contain internal Special Registers (SRs) that cannot be manipulated via normal load/store memory operations. The `xtensa` component provides assembly macros and inline functions to interact with them via `RSR` (Read Special Register), `WSR` (Write Special Register), and `XSR` (Exchange Special Register):
+
+- `CCOUNT`**CCOUNT & CCOMPARE0..2:**`CCOMPARE0..2` The high-speed CPU cycle counter and cycle-match interrupt comparators.
+    
+- `INTENABLE`**INTENABLE & INTERRUPT:**`INTERRUPT` CPU-level interrupt enable/trigger bitmasks.
+    
+- `PS`**PS (Processor State):** CPU execution privilege mode, register window pointer (`WINDOWBASE`/`WINDOWSTART`), and current interrupt mask level (`INTLEVEL`).
+    
+- `EXCCAUSE`**EXCCAUSE, EXCVADDR, EPC1..7:**`EXCVADDR``EPC1..7` Exception diagnostic registers recording the fault reason, fault address, and return Program Counter.
+    
+
+#### 3. RTOS Context Switching Primitives
+
+For multi-threading operating systems (like FreeRTOS):
+
+- Defines the exact **Xtensa Stack Frame Layout** (`XtExcFrame` / `XtSolFrame`), dictating how all general-purpose registers (`a0`–`a15`), special registers, and coprocessor states are packed into memory when a thread is suspended.
+    
+- Provides the atomic assembly context switch routines (`_frxt_dispatch`, `_frxt_int_enter`, `_frxt_int_exit`).
+    
+
+#### 4. Architecture Configuration Headers (`core-isa.h` / `xtruntime.h`)
+
+Each silicon implementation of an Xtensa core can have custom silicon parameters licensed from Cadence. The component provides headers declaring:
+
+- Number of physical general-purpose registers (e.g., 64 physical registers backing the sliding window).
+    
+- Interrupt line topologies and interrupt level priorities.
+    
+- Memory alignment, endianness, and instruction cache line sizes.
+    
+
+#### 5. DSP & SIMD / PIE Vector Extensions (ESP32-S3)
+
+On the ESP32-S3, the Xtensa LX7 core includes **PIE (Processor Instruction Extensions)**:
+
+- 128-bit SIMD vector instructions for accelerating DSP, audio processing, and machine learning (fixed-point arithmetic, FFTs, FIR filters).
+    
+- The `xtensa` component provides the context-saving routines to back up and restore these 128-bit vector coprocessor registers during task switches and interrupts.
+    
+
+### Relevance to Bare-Metal Development
+
+If you are developing a standalone bare-metal runtime for the ESP32-S3 in C++:
+
+1. **Windowed ABI vs. Call0 ABI:**
+    
+    - If you compile with the standard Xtensa ABI, you **must** include the `xtensa` window overflow/underflow vector assembly routines in your startup image (`.iram0.vectors`), or your CPU will crash as soon as function call depth exceeds the register window.
+        
+    - _Alternative:_ If you compile with `-mabi=call0`, the compiler uses flat register conventions without register windowing, allowing you to bypass window exception handlers entirely.
+        
+2. **Cycle-Accurate Delays & Profiling:**
+    
+    - Include the inline assembly helpers for reading `CCOUNT` (`rsr %0, ccount`) to build zero-overhead cycle benchmarking and microsecond delays.
+        
+3. **Crash Logging:**
+    
+    - Read `EXCCAUSE` and `EPC1` inside your user exception vector to output register dumps over UART when your bare-metal code triggers a fault.
+
+When building a bare-metal C++ framework for the ESP32-S3 without ESP-IDF or FreeRTOS, the `xtensa`**xtensa** component contains the lowest-level architectural glue for the **Xtensa LX7 core**.
+
+The pertinence of the `xtensa` component hinges on a single major architectural decision: **Which ABI are you compiling with?** (Windowed ABI vs. Call0 ABI).
+
+Here is a breakdown of what is strictly required, what to extract, and what to ignore:
+
+### 1. The Core Fork: Windowed ABI vs. Call0 ABI
+
+#### Scenario A: Using Default Windowed ABI (`-mabi=windowed`)
+
+By default, the Xtensa GCC toolchain uses **Windowed Register ABI** (`entry`, `call4`/`call8`/`call12`, `retw`). It maps a sliding window of registers (`a0`–`a15`) across a physical 64-register file. When nested function calls or recursion run out of free physical registers, the CPU hardware raises a **Window Overflow** or **Window Underflow** exception.
+
+- **Strictly Required Files:** `xtensa_vectors.S` / `window_vectors.S`
+    
+- **What you need:** The raw assembly routines that handle:
+    
+    - `WindowOverflow4`, `WindowOverflow8`, `WindowOverflow12`
+        
+    - `WindowUnderflow4`, `WindowUnderflow8`, `WindowUnderflow12`
+        
+- **Consequence:** If you do not map these assembly routines at the exact hardware vector offsets in your linker script (`.iram0.vectors`), the CPU will lock up / crash as soon as your C++ function call stack exceeds 2–3 levels of depth.
+    
+
+#### Scenario B: Using Call0 ABI (`-mabi=call0` - Recommended for Simple Bare-Metal)
+
+If you add `-mabi=call0` to your compiler flags, GCC disables register windowing entirely and uses standard flat caller/callee-saved registers (like ARM Cortex-M or RISC-V), using normal `call0` and stack pushes.
+
+- **Bare-Metal Advantage:** You can **completely omit** the complex window overflow/underflow vector assembly.
+    
+
+### 2. Strictly Pertinent: Special Register (SR) Access Primitives
+
+Xtensa CPU special registers cannot be accessed via standard memory pointers; they require specific assembly instructions (`rsr`, `wsr`, `xsr`).
+
+The pertinent header is `xtensa/xtruntime.h`**xtensa/xtruntime.h** / `xtensa/tie/xt_core.h`**xtensa/tie/xt_core.h** (or writing clean inline assembly equivalents in your C++ headers):
+
+- **Cycle Counting & Microsecond Delays:**
+    
+    - `CCOUNT`: The 32-bit hardware cycle counter running at CPU frequency (240\text{ MHz}).
+        
+    - `CCOMPARE0..2`: CPU-level cycle match comparators.
+        
+- **Interrupt Masking & Critical Sections:**
+    
+    - `INTENABLE` / `INTERRUPT`: Enabling, triggering, and clearing CPU interrupts.
+        
+    - `PS` (Processor State): Managing CPU interrupt levels (0\text{--}15) and privilege modes.
+        
+    
+    ```cpp
+    // Minimal Xtensa critical section primitive
+    inline uint32_t enter_critical() {
+        uint32_t prev_ps;
+        asm volatile("rsil %0, 15" : "=r"(prev_ps) :: "memory");
+        return prev_ps;
+    }
+    
+    inline void exit_critical(uint32_t prev_ps) {
+        asm volatile("wsr %0, ps; rsync" :: "r"(prev_ps) : "memory");
+    }
+    ```
+    
+
+### 3. Essential for Diagnostics: CPU Exception Vectors & Registers
+
+When your bare-metal code triggers a memory fault, bad pointer dereference, or illegal instruction, the hardware jumps to the **User Exception Vector** (`VECBASE + 0x50`).
+
+The `xtensa` headers define the hardware exception registers you need to read inside your exception stub:
+
+- `EXCCAUSE`**EXCCAUSE**: Numeric reason for the crash (e.g., `28` = LoadProhibited, `29` = StoreProhibited, `0` = IllegalInstruction, `9` = LoadStoreAlignmentCause).
+    
+- `EXCVADDR`**EXCVADDR**: The exact memory address that caused the fault.
+    
+- `EPC1`**EPC1**: The Program Counter (instruction address) where the crash happened.
+    
+- `xtensa/specreg.h`**xtensa/specreg.h**: Defines the symbolic names and register numbers for these special registers.
+    
+
+### 4. ESP32-S3 Specific: PIE / SIMD Vector Instructions (Optional)
+
+If you plan to utilize the ESP32-S3's 128-bit vector instructions for fast math, DSP, or audio:
+
+- **Pertinent Headers:** `xtensa/tie/xt_vector.h`, `xtensa/tie/xt_coproc.h`.
+    
+- **Coprocessor 0/1 Configuration:** You must enable the coprocessor in the `CPENABLE` special register before executing any vector instructions, or the core will throw a `Coprocessor0Disabled` exception:
+    
+    ```cpp
+    inline void enable_vector_coprocessor() {
+        asm volatile("wsr %0, cpenable; rsync" :: "r"(1));
+    }
+    ```
+    
+
+### 5. What You Can Safely Ignore in `xtensa`
+
+- **FreeRTOS Context Switch Assembly (_frxt_*):**`_frxt_*`
+    
+    - `_frxt_dispatch`, `_frxt_int_enter`, `_frxt_int_exit`, and FreeRTOS-specific interrupt stack frames.
+        
+- **Thread-Local Storage (TLS) Hooks:**
+    
+    - Complex multi-task TLS register swaps.
+        
+- **TRAX / Hardware Trace Primitives:**
+    
+    - Silicon trace-buffer registers used for dedicated hardware debugging tools.
+        
+
+### Summary Checklist for Bare-Metal Work
+
+| Area / File                            | Purpose in Bare-Metal C++                                                                                  |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `xtensa/specreg.h`**xtensa/specreg.h** | **Include:** Numeric register definitions (`CCOUNT`, `PS`, `EXCCAUSE`, `EPC1`).                            |
+| `xt_core.h`**xt_core.h / Inline ASM**  | **Implement:** `rsr`/`wsr` wrappers for atomic interrupt masking and cycle reading.                        |
+| `xtensa_vectors.S`**xtensa_vectors.S** | **Include ONLY IF** compiling with default Windowed ABI (`-mabi=windowed`). (Omit if using `-mabi=call0`). |
+| **User Exception Stub**                | **Implement:** Minimal `.iram0.vectors` entry point to log `EXCCAUSE` and `EPC1` to UART upon crashes.     |
+| **FreeRTOS Stubs**                     | **Ignore entirely:** Context switching, stack packing, and OS scheduler glue.                              |
 # esp_rom
 
 In ESP-IDF, the `esp_rom`**esp_rom** component is the dedicated interface layer between software (the bootloader, drivers, and user code) and the **factory-etched internal Mask ROM** residing on the chip.
@@ -480,7 +677,420 @@ extern "C" {
 
 # hal
 
+In ESP-IDF, the `hal`**hal (Hardware Abstraction Layer)** component provides a lightweight, stateless, and OS-independent functional interface for manipulating hardware peripherals.
+
+It sits directly between the raw register/memory definitions of the `soc`**soc** component and the high-level, FreeRTOS-aware `driver`**driver** component.
+
+### Why the `hal` Component Exists
+
+Historically, peripheral drivers in ESP-IDF mixed high-level logic (task synchronization, mutexes, FreeRTOS queues, dynamic buffer allocation) with low-level register manipulations (bit shifting, clearing FIFO flags, configuring hardware clock dividers).
+
+This tight coupling made the driver code difficult to port, test, or reuse in environments where the RTOS was not running—such as the 2nd-stage bootloader, bare-metal stubs, or unit tests executing on host PCs.
+
+The `hal` component splits this into two modular layers:
+
+1. **Low-Level Layer (*_ll.h)**`*_ll.h`: Pure, inline register manipulation.
+    
+2. **Hardware Abstraction Layer (*_hal.h / *_hal.c)**`*_hal.h``*_hal.c`: Stateless sequences of hardware operations.
+    
+
+### Core Responsibilities of `hal`
+
+#### 1. Low-Level (LL) Inline Primitives (`*_ll.h`)
+
+The LL sub-layer consists of `static inline` C functions that translate abstract hardware operations into exact register operations using the `soc` register structs:
+
+- **Stateless & Direct:** Functions take a pointer to the hardware register structure and operate on it directly (e.g., `uart_ll_write_txfifo(UART0, &byte, 1)` or `gpio_ll_set_level(GPIO, 4, 1)`).
+    
+- **Zero Overhead:** Because they are inline, they compile down to the same minimal assembly instructions as direct bitmask writes.
+    
+- **No Runtime Dependencies:** They never allocate memory, take locks, or yield CPU control.
+    
+
+#### 2. Hardware Abstraction Layer (`*_hal.h` / `*_hal.c`)
+
+The HAL sub-layer groups sequences of LL calls into logical hardware operations without introducing any OS semantics:
+
+- **Stateless Contexts:** Manages a simple peripheral context structure (e.g., `uart_hal_context_t`) tracking peripheral instance numbers and configuration parameters.
+    
+- **Hardware Sequences:** Implements non-trivial hardware procedures, such as:
+    
+    - Baud rate calculation and fractional clock divider setup.
+        
+    - Multi-step Cache/MMU mapping configuration.
+        
+    - Watchdog timer arming, feeding, and timeout sequences.
+        
+    - SPI transaction initialization and FIFO loading.
+        
+
+#### 3. Cross-Target Silicon Portability
+
+Different Espressif chips (ESP32, ESP32-S2, ESP32-S3, ESP32-C3, etc.) often share similar peripheral architectures but have subtle differences in register bitfield names, FIFO widths, or clock routing registers.
+
+- The HAL defines a unified internal interface.
+    
+- Higher-level drivers call the HAL interface without needing `#ifdef CONFIG_IDF_TARGET_ESP32S3` cluttering the driver logic.
+    
+
+### Where It Fits in the Software Stack
+
+```
++-------------------------------------------------------------------------+
+| Level 3: Peripheral Driver (`driver/uart.c`, `driver/gpio.c`)           |
+| (RTOS-aware: FreeRTOS queues, ISR dispatchers, ring buffers, semaphores)|
++-------------------------------------------------------------------------+
+                                   │
+                                   ▼
++-------------------------------------------------------------------------+
+| Level 2: `hal` Component                                                |
+| ├── HAL Layer (`uart_hal.c`): Hardware sequencing, baud calculations    |
+| └── LL Layer (`uart_ll.h`): Inline atomic register writes               |
++-------------------------------------------------------------------------+
+                                   │
+                                   ▼
++-------------------------------------------------------------------------+
+| Level 1: `soc` Component                                                |
+| (Peripheral structs `uart_struct.h`, register offsets, memory map)      |
++-------------------------------------------------------------------------+
+                                   │
+                                   ▼
++-------------------------------------------------------------------------+
+| Level 0: Physical Hardware & Registers                                  |
++-------------------------------------------------------------------------+
+```
+
+### Summary of Differences: `soc` vs. `hal` vs. `driver`
+
+|Layer|Component|Contains OS/RTOS?|Typical Code Example|
+|---|---|---|---|
+|**Hardware Definition**|`soc`|**No**|`UART0.fifo.val = data;`|
+|**Hardware Abstraction**|`hal`**hal**|**No**|`uart_ll_write_txfifo(&UART0, data, len);`|
+|**High-Level Driver**|`driver`|**Yes** (FreeRTOS)|`uart_write_bytes(UART_NUM_0, data, len);`|
+
+When building a bare-metal C++ framework for the ESP32-S3 without ESP-IDF or FreeRTOS, the `hal`**hal** component is essentially a "gold mine" of tested, zero-overhead hardware routines.
+
+Because the `hal` component is deliberately designed to be **stateless, OS-independent, and non-allocating**, it is one of the easiest components to cherry-pick into a custom bare-metal environment.
+
+The component is split into two layers: the **LL (Low-Level)** inline headers and the **HAL (Hardware Abstraction Layer)** C modules. Here is what is strictly pertinent, highly useful, and what you can safely ignore:
+
+### 1. Strictly Pertinent: LL (Low-Level) Inline Headers (`*_ll.h`)
+
+The `*_ll.h` headers provide `static inline` functions that wrap direct register reads/writes on `soc` structs. They compile down to pure assembly instructions with **zero runtime overhead**.
+
+The most pertinent LL headers for bare-metal bringup:
+
+- `hal/mmu_ll.h`**hal/mmu_ll.h & hal/mmu_hal.h (MMU & Cache Page Table Setup):**`hal/mmu_hal.h`
+    
+    - **Why it's essential:** In your 2nd-stage bootloader stub, you must map the application code stored in physical SPI/OPI flash into the virtual instruction space (0x42000000+).
+        
+    - **Key functions:** `mmu_ll_map_entry()`, `mmu_ll_set_entry_valid()`, `mmu_ll_format_entry()`.
+        
+- `hal/wdt_ll.h`**hal/wdt_ll.h (Watchdog Management):**
+    
+    - **Why it's essential:** Disabling or petting the hardware RTC and Timer Group watchdogs before they reset your bare-metal environment.
+        
+    - **Key functions:** `wdt_ll_write_protect_disable()`, `wdt_ll_disable()`, `wdt_ll_feed()`.
+        
+- `hal/systimer_ll.h`**hal/systimer_ll.h (64-bit Hardware Timer):**
+    
+    - **Why it's essential:** Reading the 64-bit monotonic system counter and arming hardware alarms for delays and timing.
+        
+    - **Key functions:** `systimer_ll_enable_clock()`, `systimer_ll_get_counter_value()`, `systimer_ll_set_alarm_target()`.
+        
+- `hal/uart_ll.h`**hal/uart_ll.h (Early & Runtime Serial I/O):**
+    
+    - **Why it's essential:** Outputting formatted strings, crash dumps, and C++ `std::cout` characters without driver overhead.
+        
+    - **Key functions:** `uart_ll_write_txfifo()`, `uart_ll_get_txfifo_len()`, `uart_ll_is_tx_idle()`.
+        
+- `hal/gpio_ll.h`**hal/gpio_ll.h (Pin Control & Matrix Routing):**
+    
+    - **Why it's essential:** Toggling GPIOs, setting input/output modes, pull-up/pull-down resistors, and connecting peripheral signals to physical pins via the GPIO matrix.
+        
+    - **Key functions:** `gpio_ll_set_level()`, `gpio_ll_get_level()`, `gpio_ll_input_enable()`, `gpio_ll_output_enable()`.
+        
+
+### 2. Highly Useful: HAL Mathematical & Hardware Sequencers (`*_hal.c`)
+
+While LL headers perform discrete register bit operations, HAL `.c` files implement non-trivial hardware algorithms and mathematical sequences. You can copy these algorithms directly into your C++ driver classes:
+
+- `uart_hal.c`**uart_hal.c (Baud Rate Fractional Divider Math):**
+    
+    - Calculates the exact integer and fractional clock dividers needed to configure a given baud rate (e.g., 115200) from the source APB/XTAL clock frequency.
+        
+- `spi_flash_hal.c`**spi_flash_hal.c / mmu_hal.c (Flash MMU Allocation Logic):**`mmu_hal.c`
+    
+    - Manages the sequence for setting up cache line boundaries, configuring MMU entry page sizes, and flushing cache invalidations.
+        
+- `clk_tree_hal.c`**clk_tree_hal.c / cpu_hal.c (CPU Frequency & Clock Setup):**`cpu_hal.c`
+    
+    - Contains the low-level logic for calculating PLL multipliers and divider ratios when configuring CPU clock speeds.
+        
+
+### 3. How to Use `hal` Cleanly in Bare-Metal C++
+
+Instead of writing verbose register manipulation code or rolling your own bitmasks, you can wrap HAL LL calls inside zero-cost C++ classes or templates:
+
+```cpp
+#include "soc/uart_struct.h"
+#include "hal/uart_ll.h"
+
+template<uintptr_t BaseAddr>
+class BareMetalUart {
+    static inline uart_dev_t* dev() {
+        return reinterpret_cast<uart_dev_t*>(BaseAddr);
+    }
+
+public:
+    static void write_byte(uint8_t byte) {
+        // Wait until there is room in the hardware FIFO
+        while (uart_ll_get_txfifo_len(dev()) == 0);
+        uart_ll_write_txfifo(dev(), &byte, 1);
+    }
+
+    static void write_string(const char* str) {
+        while (*str) {
+            write_byte(static_cast<uint8_t>(*str++));
+        }
+    }
+};
+
+using Uart0 = BareMetalUart<DR_REG_UART_BASE>;
+```
+
+### 4. What You Can Safely Ignore in `hal`
+
+- **Unused Peripherals:** Ignore HAL/LL files for hardware blocks your application does not touch (e.g., `i2s_hal`, `sdm_hal`, `mcpwm_hal`, `touch_sensor_hal`, `lcd_hal`).
+    
+- **Non-Target Chip Directories:** If targeting ESP32-S3, ignore subfolders and files specific to `esp32`, `esp32c3`, `esp32c6`, `esp32s2`.
+    
+- **Dynamic Context Structures:** You do not need the full dynamic HAL context state structures (`*_hal_context_t`) unless you want to replicate ESP-IDF’s multi-instance driver model. For bare-metal, calling the `*_ll.h` functions with direct pointers to the hardware registers is often simpler and lighter.
+    
+
+### Summary Checklist of Pertinent HAL Files
+
+```text
+hal/
+├── include/hal/
+│   ├── gpio_ll.h          <-- Direct GPIO bit manipulation
+│   ├── uart_ll.h          <-- Direct UART FIFO and status reads
+│   ├── systimer_ll.h      <-- 64-bit hardware timer counter & alarms
+│   ├── wdt_ll.h           <-- Disabling/feeding hardware watchdogs
+│   └── mmu_ll.h           <-- Page table programming for Flash cache mapping
+└── <target>/include/hal/
+    └── mmu_hal.h          <-- Target-specific MMU page calculations
+```
 # esp_hw_support
+
+In ESP-IDF, the `esp_hw_support`**esp_hw_support** (ESP Hardware Support) component serves as the **low-level hardware coordination and system support layer**. It sits at **Level 2** in the architecture hierarchy alongside `hal`, `esp_libc`, and `esp_rom`.
+
+While the `soc` and `hal` components provide static register layouts and stateless register manipulation functions, `esp_hw_support` contains the **runtime initialization sequences, clock tree management, hardware synchronization primitives, and memory protection mechanisms** that must operate independently of high-level OS drivers.
+
+### Core Responsibilities of `esp_hw_support`
+
+#### 1. Clock Tree & PLL Frequency Management
+
+On cold power-on, the CPU operates at a slow, conservative default crystal frequency (e.g., 40\text{ MHz}). `esp_hw_support` manages the clock distribution tree:
+
+- **Digital PLL (BBPLL) Initialization:** Calibrates and locks the broadband PLL to boost the CPU clock to maximum performance (**160\text{ MHz} or 240\text{ MHz}** on ESP32-S3).
+    
+- **Bus Clocks:** Configures the APB peripheral bus (80\text{ MHz}) and dynamic clock dividers for UART, SPI, and timer modules.
+    
+- **RTC Clocks:** Configures and calibrates low-power slow clocks (internal 136\text{ kHz} RC, external 32.768\text{ kHz} crystal, or 8\text{ MHz} internal oscillator).
+    
+
+#### 2. Interrupt Matrix Routing & Allocation
+
+Espressif microcontrollers feature dozens of peripheral interrupt sources that must be dynamically mapped to a limited set of CPU interrupt levels (1\text{--}7 on Xtensa):
+
+- Provides the low-level interrupt routing drivers (`intr_alloc.c`, `esp_intr_alloc`).
+    
+- Directs hardware interrupt signals from peripherals (UART, SPI, Timer, GPIO) to specific CPU interrupt vectors and priority tiers.
+    
+- Handles CPU core interrupt affinity (directing interrupts specifically to Core 0 or Core 1).
+    
+
+#### 3. Low-Level Spinlocks & Hardware Synchronization
+
+To allow safe concurrency between CPU cores and between ISRs and normal execution without relying on heavy FreeRTOS mutexes:
+
+- Provides atomic hardware spinlocks (`portMUX_TYPE`, `esp_hw_support/include/soc/spinlock.h`).
+    
+- Implements atomic memory compare-and-swap primitives used in multi-core critical sections.
+    
+
+#### 4. Hardware Sleep & Power Domain Control
+
+- Manages power switches and voltage regulators for different internal power domains:
+    
+    - **Digital Core (VDDD):** High-speed CPU, SRAM, and digital peripherals.
+        
+    - **RTC Fast/Slow Memory Domains:** Preserved during deep sleep states.
+        
+    - **Wi-Fi / Bluetooth Radio Power:** Powers on/off RF analog front-ends (ADC/DAC, bias circuits).
+        
+- Provides the hardware power-down and wakeup timing sequences for Light Sleep and Deep Sleep.
+    
+
+#### 5. Physical Memory Protection (PMS / PMP)
+
+Modern Espressif chips include Permission Management Systems (PMS) or Physical Memory Protection (PMP):
+
+- Manages hardware access control registers to restrict access to internal SRAM, flash cache windows, and peripherals.
+    
+- Prevents unprivileged DMA controllers or corrupted code execution from overwriting critical boot vectors or secure keys.
+    
+
+#### 6. Factory Calibration & Hardware ID Retrieval
+
+Provides low-level functions to extract factory calibration parameters burned into physical silicon eFuses:
+
+- **MAC Address Generation:** Derives unique base Wi-Fi, Ethernet, and Bluetooth MAC addresses from factory eFuse pools (`esp_read_mac()`).
+    
+- **ADC Calibration Values:** Retrieves two-point factory curve calibration data and reference voltages for analog-to-digital conversions.
+    
+
+### Where It Fits in the Software Stack
+
+```
++-------------------------------------------------------------------------+
+| Level 4: OS & System Orchestration (`esp_system`, `freertos`)          |
++-------------------------------------------------------------------------+
+| Level 3: High-Level Drivers (`driver`, `spi_flash`, `esp_timer`)       |
++-------------------------------------------------------------------------+
+                                   │
+                                   ▼
++-------------------------------------------------------------------------+
+| Level 2: `esp_hw_support`                                               |
+| (PLL / Clock trees, Interrupt Matrix, Spinlocks, Power Domains, PMS)   |
++-------------------------------------------------------------------------+
+                                   │
+                                   ▼
++-------------------------------------------------------------------------+
+| Level 1: `soc` & `xtensa` / `riscv` (Register Structs & ISA)            |
++-------------------------------------------------------------------------+
+                                   │
+                                   ▼
++-------------------------------------------------------------------------+
+| Level 0: Physical Silicon, PLL circuits, Analog Front-End, eFuses       |
++-------------------------------------------------------------------------+
+```
+
+### Summary of Relevance for Bare-Metal Work
+
+- **Crucial to Study / Extract:** The clock initialization sequence (`rtc_clk.c` / `esp_clk.c`) is essential for boosting the CPU from the default 40\text{ MHz} power-on state up to full 240\text{ MHz} operation.
+    
+- **Spinlocks & Critical Sections:** Useful reference if designing multi-core critical sections across Core 0 and Core 1.
+    
+- **Interrupt Routing:** Essential reference for manually configuring the hardware Interrupt Matrix without using FreeRTOS interrupt allocators.
+
+When building a bare-metal C++ runtime for the ESP32-S3 without ESP-IDF or FreeRTOS, the `esp_hw_support`**esp_hw_support** component is the definitive reference for **silicon bringup tasks that must happen before or during early application startup**.
+
+Much of `esp_hw_support` in IDF is tied to multi-core FreeRTOS allocation and dynamic power management. However, several specific hardware initialization sequences are **strictly pertinent** to getting full performance and stable hardware operation in bare metal.
+
+### 1. Strictly Pertinent: Clock Tree & PLL Initialization
+
+When the ESP32-S3 powers on or resets, the ROM bootloader leaves the CPU running at the default crystal oscillator frequency (**40\text{ MHz}**). If you never configure the clock tree, your code will execute at one-sixth of its maximum speed, and APB peripheral clocks (UART, SPI, Timers) will not match standard baud rates or frequency dividers.
+
+The pertinent logic lives in `esp_hw_support/port/esp32s3/rtc_clk.c`**esp_hw_support/port/esp32s3/rtc_clk.c** and `rtc_clk_init.c`**rtc_clk_init.c**:
+
+- **Broadband PLL (BBPLL) Enable Sequence:**
+    
+    - Enables the digital PLL circuit via the RTC controller.
+        
+    - Tunes and calibrates the PLL frequency (480\text{ MHz}).
+        
+- **CPU Clock MUX Switching:**
+    
+    - Switches the CPU clock source multiplexer from `XTAL` to `PLL` with a divider of 2 (240\text{ MHz}) or 3 (160\text{ MHz}).
+        
+- **APB Bus Clock Configuration:**
+    
+    - Sets the APB bus divider to run at a steady **80\text{ MHz}** (the standard clock reference required by UART, SPI, and timer calculations).
+        
+
+> **Bare-Metal Action:** You do not need to pull in the entire clock tree manager. Extract the minimal register-level sequence from `rtc_clk_cpu_freq_to_80m()` / `rtc_clk_cpu_freq_to_240m()` to execute once during early C++ startup.
+
+### 2. Strictly Pertinent: Hardware Interrupt Matrix Routing
+
+The ESP32-S3 has over 100 peripheral interrupt sources (UART, SPI, GPIO, SYSTIMER, etc.), but the Xtensa LX7 CPU core only has **32 internal CPU interrupt lines** (Level 1 through Level 7, plus Edge/Level triggers).
+
+The pertinent logic lives in `esp_hw_support/intr_alloc.c`**esp_hw_support/intr_alloc.c** / `esp_hw_support/port/esp32s3/`**esp_hw_support/port/esp32s3/**:
+
+- **The Interrupt Matrix Mapping:**
+    
+    - To receive an interrupt from a peripheral, you must program the hardware interrupt matrix registers (`SYSTEM_INTERRUPT_CORE0_..._REG` / `soc/interrupt_core0_reg.h`):
+        
+        1. Bind the peripheral signal index (e.g., `ETS_UART0_INTR_SOURCE` = 34) to an allocated CPU interrupt line (e.g., CPU interrupt 1, which is Level 1).
+            
+        2. Unmask and enable that interrupt line in the Xtensa `INTENABLE` special register.
+            
+- **Bare-Metal Action:** Instead of using ESP-IDF's dynamic heap-allocating `esp_intr_alloc()` driver, implement a simple static function in C++:
+    
+    ```cpp
+    inline void route_peripheral_interrupt(int source_idx, int cpu_intr_num) {
+        // Direct write to the S3 interrupt matrix register for Core 0
+        auto* reg = reinterpret_cast<volatile uint32_t*>(
+            DR_REG_INTERRUPT_CORE0_BASE + (source_idx * 4)
+        );
+        *reg = cpu_intr_num;
+    }
+    ```
+    
+
+### 3. Highly Pertinent: Low-Level Spinlocks (Multi-Core Synchronization)
+
+If your bare-metal setup boots both Xtensa LX7 cores (Core 0 and Core 1) or coordinates hardware access between main execution and ISRs:
+
+- **Header:** `esp_hw_support/include/soc/spinlock.h`**esp_hw_support/include/soc/spinlock.h**
+    
+- **What it does:** Implements atomic hardware test-and-set spinlocks using Xtensa `s32c1i` (conditional store / atomic compare-and-swap) or atomic hardware memory locks.
+    
+- **Bare-Metal Action:** Use this header directly to implement zero-overhead C++ RAII lock guards (`std::lock_guard` equivalents) for bare-metal multi-core critical sections without pulling in FreeRTOS mutexes.
+    
+
+### 4. Highly Pertinent: Factory MAC & Silicon Calibration Data
+
+- `esp_hw_support/mac_addr.c`**esp_hw_support/mac_addr.c:**
+    
+    - Logic that reads the base IEEE 802.11 MAC address factory-programmed into eFuse Block 0.
+        
+    - Essential if your bare-metal project needs a valid, unique hardware MAC address or unique device serial identifier.
+        
+- `esp_hw_support/port/esp32s3/sar_periph_ctrl.c`**esp_hw_support/port/esp32s3/sar_periph_ctrl.c (ADC & Sensor Calibration):**
+    
+    - Contains the analog-to-digital converter (SAR ADC) reference voltage calibration routines. If reading analog sensors in bare metal, copying these polynomial curve calculations ensures accurate millivolt readings.
+        
+
+### 5. What You Can Safely Ignore in `esp_hw_support`
+
+- **Dynamic Frequency Scaling (DFS) & Dynamic Power Management (pm_*.c):**`pm_*.c`
+    
+    - High-overhead OS routines that automatically throttle clock frequencies based on FreeRTOS idle task load.
+        
+- **Sleep Wakeup Timing Sequencers (sleep_modes.c, sleep_retention.c):**`sleep_modes.c``sleep_retention.c`
+    
+    - Complex state machines for backing up SRAM contents and CPU register state to RTC fast memory during deep sleep states.
+        
+- **Physical Memory Protection (PMS / PMP):**
+    
+    - Permission Management System tables restricting bus access permissions across user/kernel privilege tiers.
+        
+- **Async DMA Memory Allocations:**
+    
+    - Dynamic buffer allocators for general-purpose DMA descriptors.
+        
+
+### Summary: What to Extract vs. What to Ignore
+
+| Feature / Area                            | Pertinence in Bare-Metal | Action                                                                                                              |
+| ----------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| `rtc_clk.c`**rtc_clk.c (PLL Setup)**      | **Strictly Required**    | Extract the register sequence to switch CPU from 40\text{ MHz} \rightarrow 240\text{ MHz} and APB to 80\text{ MHz}. |
+| **Interrupt Matrix Routing**              | **Strictly Required**    | Implement a simple register write to bind peripheral interrupt indices to Xtensa CPU interrupt lines.               |
+| `spinlock.h`**spinlock.h**                | **Highly Useful**        | Include directly for atomic multi-core or ISR spinlocks (`s32c1i`).                                                 |
+| `mac_addr.c`**mac_addr.c**                | **Useful**               | Reference for reading factory MAC addresses from eFuse.                                                             |
+| `pm_*.c`**pm_*.c / sleep_*.c**`sleep_*.c` | **Ignore**               | Discard dynamic power management and complex sleep state retention trees.                                           |
 
 # spi_flash
 
@@ -884,6 +1494,173 @@ If you need non-blocking timeouts or periodic callbacks:
 | **Core OS Service**   | `esp_timer.c` / `esp_timer.h` | **Ignore:** Discard entirely; replace with direct register reads or a simple C++ static monotonic clock class. |
 
 # efuse
+
+In ESP-IDF, the `efuse`**efuse** component is the dedicated driver and abstraction layer for interacting with the chip’s on-silicon **eFuse controller and One-Time-Programmable (OTP) memory array**.
+
+eFuses are physical microscopic silicon fuses that are blown (programmed from `0` to `1`) during chip manufacturing or in the field. Because eFuse bits are **hardware-immutable and cannot be erased or reset**, the `efuse` component manages the reading, virtualizing, and permanent burning of these critical system parameters.
+
+### Core Responsibilities of the `efuse` Component
+
+#### 1. Hardware Identity, Package & Revision Decoding
+
+During fabrication, Espressif burns factory calibration and chip identity information into eFuse:
+
+- **MAC Addresses:** Stores factory-assigned base IEEE 802.11 / Bluetooth MAC addresses (`esp_efuse_read_mac()`).
+    
+- **Silicon Revision & Package Type:** Encodes the minor/major chip revision (e.g., v0.1 vs v0.2 silicon) and internal hardware features (e.g., whether the ESP32-S3 module includes embedded 8 MB Flash, Octal PSRAM, etc.).
+    
+- **ADC Calibration:** Stores factory reference voltages (V_{\text{ref}}) and two-point offset calibration curves used by the analog-to-digital converter.
+    
+
+#### 2. Hardware Security & Cryptographic Key Management
+
+The ESP32 family uses dedicated eFuse memory blocks to store hardware encryption keys that can be locked against software read access:
+
+- **Secure Boot Keys:** Stores public key digest fingerprints (RSA-3072 / ECC) used by the 1st-stage ROM bootloader to cryptographically verify 2nd-stage firmware.
+    
+- **Flash Encryption Keys:** Stores AES-128 / XTS-AES keys directly routed to the hardware Flash Encryption DMA engine.
+    
+- **Hardware HMAC & Digital Signature (DS) Keys:** Configures key purpose registers so the hardware crypto engines can compute signatures without ever exposing the private key to software or RAM.
+    
+- **Security Control Bits:** Manages security lockout fuses (e.g., permanently disabling the ROM UART download bootloader, disabling JTAG hardware debugging).
+    
+
+#### 3. Silicon Configuration & Power Domain Settings
+
+- **VDD_SPI Power Domain:** Configures whether the external SPI Flash and PSRAM power rail operates at **3.3\text{V}** or **1.8\text{V}**.
+    
+- **SPI Pin Remapping:** Tells the ROM bootloader if physical SPI flash pins have been redirected away from default GPIO pads.
+    
+- **Clock & Watchdog Controls:** eFuse configuration bits for internal RC oscillator tuning and hardware watchdog behaviors.
+    
+
+#### 4. Safe Programming & Virtual eFuse Emulation
+
+Writing to physical eFuses is irreversible (blowing a fuse applies a high programming voltage that physically alters silicon):
+
+- **Burning Timing Sequences:** Implements the strict hardware timing algorithms, power switches, and burn pulses required to program fuses without damaging the chip.
+    
+- **Virtual eFuses (CONFIG_EFUSE_VIRTUAL):**`CONFIG_EFUSE_VIRTUAL` For testing and development, the component allows developers to emulate eFuses in internal RAM. This lets you test secure boot, custom MAC addresses, or key management in software without permanently blowing physical fuses on development hardware.
+    
+
+### Where It Fits in the Software Stack
+
+```
++-------------------------------------------------------------------------+
+| Level 4/5: Security & Application (mbedtls, esp_system, app_main)      |
++-------------------------------------------------------------------------+
+| Level 3: `efuse` Component (API: `esp_efuse_read_field_blob`, keys)     |
++-------------------------------------------------------------------------+
+| Level 2: `hal/efuse_ll.h` & `hal/efuse_hal.c` (Stateless burn sequences)|
++-------------------------------------------------------------------------+
+| Level 1: `soc/efuse_struct.h` & `soc/efuse_reg.h` (Register bitfields)  |
++-------------------------------------------------------------------------+
+| Level 0: Physical eFuse Blocks (Block 0..10 OTP Silicon Fuses)          |
++-------------------------------------------------------------------------+
+```
+
+### Relevance for Bare-Metal Development
+
+If you are developing a standalone bare-metal C++ framework:
+
+- **Reading is Simple:** The eFuse array is directly memory-mapped. To read standard values (like MAC addresses, chip revision, or calibration data), you can simply read the memory-mapped `EFUSE.rd_*.val` registers defined in `soc/efuse_struct.h` without needing the full high-level `efuse` component.
+    
+- **Writing/Burning:** If your bare-metal setup needs to burn cryptographic keys or lock down JTAG, you should reference the programming voltage and timing sequence in `hal/efuse_ll.h`.
+
+When building a bare-metal C++ runtime for the ESP32-S3 without ESP-IDF or FreeRTOS, the `efuse`**efuse** component is largely an **optional reference** rather than a strict dependency.
+
+On hardware reset, the internal ROM bootloader automatically reads the physical eFuses and mirrors their contents into memory-mapped registers. This means **reading eFuses in bare metal requires no complex driver logic—just simple register reads against soc/efuse_struct.h**`soc/efuse_struct.h`.
+
+The pertinent parts of `efuse` break down into what to read directly, what algorithms to reference, and what to ignore.
+
+### 1. Strictly Pertinent: Direct Memory-Mapped Register Reads
+
+Instead of importing the high-level `efuse` component code, you can use the register layout definitions in `soc/efuse_struct.h`**soc/efuse_struct.h** and `soc/efuse_reg.h`**soc/efuse_reg.h** to directly read factory parameters:
+
+#### A. Factory MAC Address (`EFUSE_BLK1` / `EFUSE_BLK2`)
+
+To derive a unique hardware identifier or configure custom networking/LoRa headers:
+
+- The factory IEEE 802.11 Wi-Fi / Bluetooth base MAC is burned into eFuse **Block 1** (or Block 2 on certain silicon revisions).
+    
+- _Bare-Metal Action:_ Read the 6 bytes directly from the mirrored `EFUSE.rd_mac_sys_0.val` and `EFUSE.rd_mac_sys_1.val` registers:
+    
+    ```cpp
+    #include "soc/efuse_struct.h"
+    
+    struct MacAddress {
+        uint8_t bytes[6];
+    };
+    
+    inline MacAddress get_factory_mac() {
+        MacAddress mac{};
+        uint32_t mac_lo = EFUSE.rd_mac_sys_0.mac_0; // Low 32 bits
+        uint32_t mac_hi = EFUSE.rd_mac_sys_1.mac_1; // High 16 bits
+    
+        mac.bytes[0] = static_cast<uint8_t>(mac_hi >> 8);
+        mac.bytes[1] = static_cast<uint8_t>(mac_hi);
+        mac.bytes[2] = static_cast<uint8_t>(mac_lo >> 24);
+        mac.bytes[3] = static_cast<uint8_t>(mac_lo >> 16);
+        mac.bytes[4] = static_cast<uint8_t>(mac_lo >> 8);
+        mac.bytes[5] = static_cast<uint8_t>(mac_lo);
+        return mac;
+    }
+    ```
+    
+
+#### B. Silicon Revision & Embedded Memory Detection
+
+- `EFUSE.rd_blk0_data3.pkg_version`**EFUSE.rd_blk0_data3.pkg_version:** Identifies whether your ESP32-S3 module has integrated embedded Flash / Octal PSRAM or uses external SPI lines.
+    
+- `EFUSE.rd_blk0_data3.wafer_version_major`**EFUSE.rd_blk0_data3.wafer_version_major / minor:**`minor` Useful for conditionally applying silicon errata workarounds.
+    
+
+### 2. Pertinent If Using Analog Peripherals (ADC Calibration)
+
+If your bare-metal C++ application reads analog voltages (e.g., battery monitoring, analog sensors):
+
+- Raw ESP32-S3 ADC readings are non-linear and vary from chip to chip due to reference voltage tolerances (V_{\text{ref}}).
+    
+- During factory testing, Espressif burns **Two-Point Offset Calibration** or **Vref curves** into eFuse **Block 2**.
+    
+- **Pertinent Reference:** Inspect `esp_efuse_rtc_calib.c`**esp_efuse_rtc_calib.c** inside `efuse` to extract the bit offsets and polynomial equations required to convert raw ADC readings into accurate millivolt values.
+    
+
+### 3. Pertinent Only If Programming Fuses at Runtime
+
+If your bare-metal workflow needs to burn keys, lock JTAG, or write custom user metadata into **Block 3 (User Data)** in the field:
+
+- `hal/efuse_ll.h`**hal/efuse_ll.h & hal/efuse_hal.c (Burn Timing Sequence):**`hal/efuse_hal.c`
+    
+    - Programming an eFuse is destructive and requires precise hardware clock gating, burn pulse durations, and programming voltage enabling (VDD\_RTC power switches).
+        
+    - You must follow the exact register sequence in `efuse_hal` (setting write mode, pulsing `EFUSE_CONF_REG`, and issuing `EFUSE_CMD_WRITE`) to avoid corrupting adjacent fuse bits.
+        
+
+### 4. What You Can Safely Ignore in `efuse`
+
+- **Field Descriptor Table Generator (esp_efuse_table.c / esp_efuse_fields.c):**`esp_efuse_table.c``esp_efuse_fields.c`
+    
+    - ESP-IDF includes hundreds of auto-generated table structs to map human-readable field strings (like `"SECURE_BOOT_EN"`) to bitmasks. This adds unnecessary binary bloat to a bare-metal image.
+        
+- **Virtual eFuse Emulation Layer (CONFIG_EFUSE_VIRTUAL):**`CONFIG_EFUSE_VIRTUAL`
+    
+    - The RAM-emulation layer used by IDF test suites.
+        
+- **Key Revocation & Secure Boot Dynamic Checkers:**
+    
+    - Unless you are writing custom secure boot validation in your bootloader, the ROM handles secure boot verification before your code ever runs.
+        
+
+### Summary Checklist for Bare-Metal Work
+
+| Task                        | File / Resource         | Bare-Metal Approach                                       |
+| --------------------------- | ----------------------- | --------------------------------------------------------- |
+| **MAC Address**             | `soc/efuse_struct.h`    | Direct register read of `EFUSE.rd_mac_sys_0/1`.           |
+| **Package / Revision**      | `soc/efuse_struct.h`    | Direct register read of `EFUSE.rd_blk0_data3`.            |
+| **ADC Voltage Calibration** | `esp_efuse_rtc_calib.c` | Copy the bit-extraction and millivolt conversion formula. |
+| **Burning Fuses**           | `hal/efuse_ll.h`        | Follow the low-level hardware burn pulse timing sequence. |
+| **IDF Field Tables**        | `esp_efuse_table.c`     | **Ignore entirely.**                                      |
 # esp_system
 
 In ESP-IDF, the `esp_system`**esp_system** component is the core system management and runtime orchestrator. It sits directly between low-level hardware components (like `soc` and `hal`) and high-level application frameworks, managing the entire lifecycle of the system from early power-on initialization to controlled restarts and crash handling.
